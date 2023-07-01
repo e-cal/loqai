@@ -1,0 +1,6 @@
+[submodule "llama.cpp"]
+	path = llama.cpp
+	url = git@github.com:e-cal/llama.cpp.git
+[submodule "whisper.cpp"]
+	path = whisper.cpp
+	url = git@github.com:e-cal/whisper.cpp.git
