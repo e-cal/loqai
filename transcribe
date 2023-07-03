@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 
-LONGOPTS=file:,model:,output:,format:
-OPTIONS=f:m:o:
+LONGOPTS=file:,model:,output:,format:,stream
+OPTIONS=f:m:o:s
 
 ! PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTS --name "$0" -- "$@")
 # read getopt’s output this way to handle the quoting right:
 eval set -- "$PARSED"
 
-file="" m=models/whisper/ggml-tiny.bin output="" format=""
+file="" m=models/whisper/ggml-tiny.bin output="" format="" stream=false
 # now enjoy the options in order and nicely split until we see --
 while true; do
 	case "$1" in
@@ -26,6 +26,10 @@ while true; do
     --format)
         format="$2"
         shift 2
+        ;;
+    -s | --stream)
+        stream=true
+        shift 1
         ;;
 	--)
 		shift
@@ -57,11 +61,14 @@ if [[ -n $output ]]; then
     if [[ -z $format ]]; then
         format="-otxt"
     fi
-
-
-else
-	whisper.cpp/main -m "$m" -f "$file" "$@"
 fi
 
-cmd="whisper.cpp/main -m \"$m\" -f \"$file\" $outflag $format \"$@\""
+# if not stream
+if [[ $stream == true ]]; then
+    cmd="whisper.cpp/stream -m $m"
+    echo $cmd
+else
+    cmd="whisper.cpp/main -m \"$m\" -f \"$file\" $outflag $format"
+fi
+
 eval $cmd

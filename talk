@@ -1,9 +1,11 @@
 #!/usr/bin/env python
+import asyncio
 import contextlib
 import json
+import multiprocessing
 import os
 import subprocess
-import sys
+import time
 import wave
 
 import pyaudio
@@ -18,8 +20,6 @@ RATE = 16000
 import argparse
 
 parser = argparse.ArgumentParser()
-# parser.add_argument("-a", "--arg", type=str, required=True)
-# parser.add_argument("-b", "--bool", action="store_true")
 parser.add_argument(
     "-i", "--interval", type=float, default=5, help="Transcription interval (s)"
 )
@@ -27,27 +27,51 @@ args = parser.parse_args()
 
 INTERVAL = args.interval
 
-with contextlib.redirect_stdout(None):
-    p = pyaudio.PyAudio()
-
-    stream = p.open(
-        format=FORMAT,
-        channels=CHANNELS,
-        rate=RATE,
-        input=True,
-        frames_per_buffer=CHUNK,
-    )
+p = pyaudio.PyAudio()
+stream = p.open(
+    format=FORMAT,
+    channels=CHANNELS,
+    rate=RATE,
+    input=True,
+    frames_per_buffer=CHUNK,
+)
 
 print("* recording")
 
 
-def write(frames):
+def write(frames, p):
     wf = wave.open(".__tmp.wav", "wb")
-    wf.setnchannels(CHANNELS)
-    wf.setsampwidth(p.get_sample_size(FORMAT))
-    wf.setframerate(RATE)
+    wf.setnchannels(2)
+    wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+    wf.setframerate(16000)
     wf.writeframes(b"".join(frames))
     wf.close()
+
+
+def run(frames, p):
+    write(frames, p)
+    subprocess.call(
+        ["./transcribe", "-f", ".__tmp.wav", "-o", ".__tmp", "--format", "json"],
+        stdout=open(os.devnull, "wb"),
+        stderr=open(os.devnull, "wb"),
+    )
+
+    with open(".__tmp.json", "r") as f:
+        out = json.loads(f.read())
+
+    text = [line["text"] for line in out["transcription"]]
+    # for line in out["transcription"]:
+    #     ts = line["timestamps"]
+    #     offsets = line["offsets"]
+    #     text.append(line["text"])
+
+    text = "\n".join(text)
+    print("You:\n" + text)
+
+    # TODO: make this async
+    # maybe need a queue or something?
+    res = get_response(text, n_predict=50)
+    print("Response:\n" + res)
 
 
 # for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
@@ -62,34 +86,15 @@ try:
         if i == INTERVAL * sec:  # every 3 seconds
             # TODO: can I pipe frames as bytes to ./stt ?
             # // do I need to write to a file? surely I can pass the bytes directly
-            write(frames)
-            subprocess.call(
-                ["./stt", "-f", ".__tmp.wav", "-o", ".__tmp", "--format", "json"],
-                stdout=open(os.devnull, "wb"),
-                stderr=open(os.devnull, "wb"),
+            start = time.time()
+            proc = multiprocessing.Process(
+                target=run,
+                args=(
+                    frames,
+                    p,
+                ),
             )
-
-            with open(".__tmp.json", "r") as f:
-                out = json.loads(f.read())
-            # pattern = re.compile(r'\[\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}\]')
-            # text = [line for line in out if pattern.match(line)]
-            # print("\n".join(text))
-            for line in out["transcription"]:
-                ts = line["timestamps"]
-                offsets = line["offsets"]
-                text = line["text"]
-                print(text)
-                # for token in stream_response(text):
-                    # sys.stdout.write(token)
-                    # sys.stdout.flush()
-
-                # TODO: make this async
-                # maybe need a queue or something?
-                res = get_response(text, n_predict=20)
-                print("Response:", res)
-                print("---")
-
-            # print(out["transcription"])
+            proc.start()
 
             # text response just post to localhost:8080
             # when i have text response
@@ -97,6 +102,10 @@ try:
 
             frames = []
             i = 0
+
+            time.sleep(100)
+            break
+
         i += 1
 except KeyboardInterrupt:
     pass
