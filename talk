@@ -86,7 +86,7 @@ try:
                 # TODO: make this async
                 # maybe need a queue or something?
                 res = get_response(text, n_predict=20)
-                print(res)
+                print("Response:", res)
                 print("---")
 
             # print(out["transcription"])
