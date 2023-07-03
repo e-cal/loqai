@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+cd llama.cpp && ./server -m ../models/llama/nous-hermes-13b.ggmlv3.q4_K_S.bin -c 2048

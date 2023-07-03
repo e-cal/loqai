@@ -1,0 +1,40 @@
+#!/bin/bash
+
+
+LONGOPTS=output:,time:
+OPTIONS=o:t:
+
+! PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTS --name "$0" -- "$@")
+# read getopt’s output this way to handle the quoting right:
+eval set -- "$PARSED"
+
+out="" t=3
+# now enjoy the options in order and nicely split until we see --
+while true; do
+    case "$1" in
+    -o | --output)
+        out="$2"
+        shift 2
+        ;;
+    -t | --time)
+        t="$2"
+        shift 2
+        ;;
+    --)
+        shift
+        break
+        ;;
+    *)
+        echo "Unknown option: $1"
+        exit 3
+        ;;
+    esac
+done
+
+if [[ -n "$out" ]]; then
+	echo "Recording..."
+	rec -b 16 -r 16000 -c 1 -e signed-integer "$out" trim 0 "$t"
+	echo -e "\nSaved "$t"s of audio to $out"
+else
+	rec -b 16 -r 16000 -c 1 -e signed-integer -t raw -
+fi

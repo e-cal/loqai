@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+
+LONGOPTS=file:,model:,output:,format:
+OPTIONS=f:m:o:
+
+! PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTS --name "$0" -- "$@")
+# read getopt’s output this way to handle the quoting right:
+eval set -- "$PARSED"
+
+file="" m=models/whisper/ggml-tiny.bin output="" format=""
+# now enjoy the options in order and nicely split until we see --
+while true; do
+	case "$1" in
+	-f | --file)
+		file="$2"
+		shift 2
+		;;
+	-m | --model)
+		m="$2"
+		shift 2
+		;;
+	-o | --output)
+		output="$2"
+		shift 2
+		;;
+    --format)
+        format="$2"
+        shift 2
+        ;;
+	--)
+		shift
+		break
+		;;
+	*)
+		echo "Unknown option: $1"
+		exit 3
+		;;
+	esac
+done
+
+
+if [[ -n $format ]]; then
+    case $format in
+    txt) format="-otxt" ;;
+    vtt) format="-ovtt" ;;
+    srt) format="-osrt" ;;
+    lrc) format="-olrc" ;;
+    words) format="-owts" ;;
+    csv) format="-ocsv" ;;
+    json) format="-oj" ;;
+    esac
+fi
+
+outflag=""
+if [[ -n $output ]]; then
+    outflag="--output-file $output"
+    if [[ -z $format ]]; then
+        format="-otxt"
+    fi
+
+
+else
+	whisper.cpp/main -m "$m" -f "$file" "$@"
+fi
+
+cmd="whisper.cpp/main -m \"$m\" -f \"$file\" $outflag $format \"$@\""
+eval $cmd

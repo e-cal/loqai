@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+echo "$@" | piper -m models/piper/en_US-danny-low.onnx -f "tts.wav"
