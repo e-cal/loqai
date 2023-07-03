@@ -1,3 +1,53 @@
 #!/usr/bin/env bash
 
+
+endsec() {
+    cols=$(tput cols)
+    line=$(printf "%${cols}s" | tr ' ' '-')
+    echo -e "\n$line\n"
+}
+
+# Submodules
+echo "Initializing submodules..."
 git submodule init && git submodule update --recursive
+endsec
+
+# Build llama server
+echo "Building llama server..."
+cd llama.cpp && LLAMA_BUILD_SERVER=1 make
+cd ..
+endsec
+
+# Build whisper
+echo "Building whisper..."
+cd whisper.cpp && make
+cd ..
+endsec
+
+
+# Download models
+read -p "Download model weights? [y/n] " DOWNLOAD_CHOICE
+
+if [[ $DOWNLOAD_CHOICE == "y" || $DOWNLOAD_CHOICE == "Y" ]]; then
+    echo "Creating directories for models..."
+    mkdir -p models/llama
+    mkdir -p models/whisper
+
+    # Ask the user for the URLs of the models they want to download, with default values
+    read -p "llama weights url (default: https://huggingface.co/TheBloke/Nous-Hermes-13B-GGML/resolve/main/nous-hermes-13b.ggmlv3.q4_K_S.bin): " LLAMA_MODEL_URL
+    LLAMA_MODEL_URL=${LLAMA_MODEL_URL:-https://huggingface.co/TheBloke/Nous-Hermes-13B-GGML/resolve/main/nous-hermes-13b.ggmlv3.q4_K_S.bin}
+
+    read -p "whisper weights url (default: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin): " WHISPER_MODEL_URL
+    WHISPER_MODEL_URL=${WHISPER_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin}
+
+    # Extract the model names from the URLs
+    LLAMA_MODEL_NAME=$(basename $LLAMA_MODEL_URL)
+    WHISPER_MODEL_NAME=$(basename $WHISPER_MODEL_URL)
+
+    # Downloading model files from user-specified URLs (or default URLs) and save them to the specified directories
+    curl -L $LLAMA_MODEL_URL -o models/llama/$LLAMA_MODEL_NAME
+    curl -L $WHISPER_MODEL_URL -o models/whisper/$WHISPER_MODEL_NAME
+else
+    echo "Skipping model download..."
+fi
+endsec
