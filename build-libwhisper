@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+cd whisper.cpp
+
+# build shared libwhisper.so
+# gcc -O3 -std=c11   -pthread -mavx -mavx2 -mfma -mf16c -fPIC -c ggml.c
+# g++ -O3 -std=c++11 -pthread --shared -fPIC -static-libstdc++ whisper.cpp ggml.o -o libwhisper.so
+
+cmake -S whisper.cpp -B whisper.cpp/build/ $(CMAKE_FLAGS)
+cmake --build whisper.cpp/build --verbose
+ctypesgen ./whisper.cpp/whisper.h -llibwhisper.dylib -o whisper_cpp.py
