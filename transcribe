@@ -1,0 +1,110 @@
+#!/usr/bin/env python
+import contextlib
+import json
+import os
+import subprocess
+import sys
+import wave
+
+import pyaudio
+
+from llamapi import get_response
+
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 2
+RATE = 16000
+
+import argparse
+
+parser = argparse.ArgumentParser()
+# parser.add_argument("-a", "--arg", type=str, required=True)
+# parser.add_argument("-b", "--bool", action="store_true")
+parser.add_argument(
+    "-i", "--interval", type=float, default=5, help="Transcription interval (s)"
+)
+args = parser.parse_args()
+
+INTERVAL = args.interval
+
+with contextlib.redirect_stdout(None):
+    p = pyaudio.PyAudio()
+
+    stream = p.open(
+        format=FORMAT,
+        channels=CHANNELS,
+        rate=RATE,
+        input=True,
+        frames_per_buffer=CHUNK,
+    )
+
+print("* recording")
+
+
+def write(frames):
+    wf = wave.open(".__tmp.wav", "wb")
+    wf.setnchannels(CHANNELS)
+    wf.setsampwidth(p.get_sample_size(FORMAT))
+    wf.setframerate(RATE)
+    wf.writeframes(b"".join(frames))
+    wf.close()
+
+
+# for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+sec = int(RATE / CHUNK)
+
+i = 0
+frames = []
+try:
+    while True:
+        data = stream.read(CHUNK)
+        frames.append(data)
+        if i == INTERVAL * sec:  # every 3 seconds
+            # TODO: can I pipe frames as bytes to ./stt ?
+            # // do I need to write to a file? surely I can pass the bytes directly
+            write(frames)
+            subprocess.call(
+                ["./stt", "-f", ".__tmp.wav", "-o", ".__tmp", "--format", "json"],
+                stdout=open(os.devnull, "wb"),
+                stderr=open(os.devnull, "wb"),
+            )
+
+            with open(".__tmp.json", "r") as f:
+                out = json.loads(f.read())
+            # pattern = re.compile(r'\[\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}\]')
+            # text = [line for line in out if pattern.match(line)]
+            # print("\n".join(text))
+            for line in out["transcription"]:
+                ts = line["timestamps"]
+                offsets = line["offsets"]
+                text = line["text"]
+                print(text)
+                # for token in stream_response(text):
+                    # sys.stdout.write(token)
+                    # sys.stdout.flush()
+
+                # TODO: make this async
+                # maybe need a queue or something?
+                res = get_response(text, n_predict=20)
+                print(res)
+                print("---")
+
+            # print(out["transcription"])
+
+            # text response just post to localhost:8080
+            # when i have text response
+            # write to file and play (probably using subprocess)
+
+            frames = []
+            i = 0
+        i += 1
+except KeyboardInterrupt:
+    pass
+
+print("\ncleaning up...")
+
+stream.stop_stream()
+stream.close()
+p.terminate()
+
+subprocess.call(["rm", ".__tmp.wav", ".__tmp.json"])
