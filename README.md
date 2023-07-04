@@ -1,5 +1,7 @@
-# NPC
+# loqai
 
-Talk to your computer, there's an NPC in there.
+> loquor, loqui, locutus (verb): to talk, speak, or tell.
+
+Converse with your computer in real time. 
 
 > Credit: inspired by [yacineMTB/talk](https://github.com/yacineMTB/talk)
