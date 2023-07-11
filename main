@@ -10,6 +10,7 @@ from typing import Mapping
 import numpy as np
 import pyaudio
 from faster_whisper import WhisperModel
+from faster_whisper.transcribe import Segment
 
 from llamapi import get_response
 
@@ -57,6 +58,9 @@ def cleanup(p, stream):
 
 class Responder:
     def __init__(self) -> None:
+        pass
+
+    def respond(self, segments: list[Segment]) -> None:
         pass
 
 
@@ -243,10 +247,12 @@ class Transcriber:
 
     def transcribe(self, audio):
         # TODO: probably want to collect multiple frames
+        print("transcribing...")
         segments, info = self.model.transcribe(audio, **self.transcribe_opts)
-        # is it faster to collect transcriptions, or iterate transcribe->respond
-        # // do we want to respond to each segment, or the whole thing?
-        self.responder.respond(segments)
+        transcript = list(segments)
+        print(info)
+        print(transcript)
+        self.responder.respond(transcript)
 
     def transcribe_cb(
         self,
