@@ -1,0 +1,305 @@
+#!/usr/bin/env python
+import json
+import multiprocessing
+import os
+import subprocess
+import time
+import wave
+from typing import Mapping
+
+import numpy as np
+import pyaudio
+from faster_whisper import WhisperModel
+
+from llamapi import get_response
+
+# Audio recording
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 2
+RATE = 16000  # whisper requires 16Hz i think
+MS = int(CHUNK / RATE * 1000)
+SEC = int(RATE / CHUNK)
+
+# Whisper
+DEF_MODEL_SIZE = "tiny.en"  # tiny.en, base.en, small.en, medium.en, large-v1, large-v2
+
+
+def init_audio(callback) -> tuple[pyaudio.PyAudio, pyaudio.Stream]:
+    # Init pyaudio
+    p = pyaudio.PyAudio()
+    stream = p.open(
+        format=FORMAT,
+        channels=CHANNELS,
+        rate=RATE,
+        input=True,
+        frames_per_buffer=CHUNK,
+        stream_callback=callback,
+    )
+    return p, stream
+
+
+def write_audio(frames, p):
+    wf = wave.open(".__tmp.wav", "wb")
+    wf.setnchannels(2)
+    wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+    wf.setframerate(16000)
+    wf.writeframes(b"".join(frames))
+    wf.close()
+
+
+def cleanup(p, stream):
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+    subprocess.call(["rm", ".__tmp.wav", ".__tmp.json"])
+
+
+class Responder:
+    def __init__(self) -> None:
+        pass
+
+
+class Transcriber:
+    def __init__(
+        self,
+        model_size_or_path: str,
+        responder: Responder,
+        transc_int_ms: int = 3000,
+        keep_ms: int = 200,
+        **kwargs,
+    ) -> None:
+        """Initializes the Transcriber and internal Whisper model.
+
+        Args:
+            model_size_or_path: Size of the model to use (tiny, tiny.en, base, base.en,
+            small, small.en, medium, medium.en, large-v1, or large-v2), a path to a converted
+            model directory, or a CTranslate2-converted Whisper model ID from the Hugging Face Hub.
+            When a size or a model ID is configured, the converted model is downloaded
+            from the Hugging Face Hub.
+            responder: A responder object that implements the `respond` method.
+            transc_int_ms: Interval in milliseconds between transcriptions.
+            keep_ms: Number of milliseconds to keep in the buffer from the previous transcription.
+        
+
+        Kwargs:
+
+          Model:
+            device: Device to use for computation ("cpu", "cuda", "auto").
+            device_index: Device ID to use.
+            The model can also be loaded on multiple GPUs by passing a list of IDs
+            (e.g. [0, 1, 2, 3]). In that case, multiple transcriptions can run in parallel
+            when transcribe() is called from multiple Python threads (see also num_workers).
+            compute_type: Type to use for computation.
+            See https://opennmt.net/CTranslate2/quantization.html.
+            cpu_threads: Number of threads to use when running on CPU (4 by default).
+            A non zero value overrides the OMP_NUM_THREADS environment variable.
+            num_workers: When transcribe() is called from multiple Python threads,
+            having multiple workers enables true parallelism when running the model
+            (concurrent calls to self.model.generate() will run in parallel).
+            This can improve the global throughput at the cost of increased memory usage.
+            download_root: Directory where the models should be saved. If not set, the models
+            are saved in the standard Hugging Face cache directory.
+            local_files_only:  If True, avoid downloading the file and return the path to the
+            local cached file if it exists.
+
+          Transcription:
+            audio: Path to the input file (or a file-like object), or the audio waveform.
+            language: The language spoken in the audio. It should be a language code such
+              as "en" or "fr". If not set, the language will be detected in the first 30 seconds
+              of audio.
+            task: Task to execute (transcribe or translate).
+            beam_size: Beam size to use for decoding.
+            best_of: Number of candidates when sampling with non-zero temperature.
+            patience: Beam search patience factor.
+            length_penalty: Exponential length penalty constant.
+            temperature: Temperature for sampling. It can be a tuple of temperatures,
+              which will be successively used upon failures according to either
+              `compression_ratio_threshold` or `log_prob_threshold`.
+            compression_ratio_threshold: If the gzip compression ratio is above this value,
+              treat as failed.
+            log_prob_threshold: If the average log probability over sampled tokens is
+              below this value, treat as failed.
+            no_speech_threshold: If the no_speech probability is higher than this value AND
+              the average log probability over sampled tokens is below `log_prob_threshold`,
+              consider the segment as silent.
+            condition_on_previous_text: If True, the previous output of the model is provided
+              as a prompt for the next window; disabling may make the text inconsistent across
+              windows, but the model becomes less prone to getting stuck in a failure loop,
+              such as repetition looping or timestamps going out of sync.
+            initial_prompt: Optional text string or iterable of token ids to provide as a
+              prompt for the first window.
+            prefix: Optional text to provide as a prefix for the first window.
+            suppress_blank: Suppress blank outputs at the beginning of the sampling.
+            suppress_tokens: List of token IDs to suppress. -1 will suppress a default set
+              of symbols as defined in the model config.json file.
+            without_timestamps: Only sample text tokens.
+            max_initial_timestamp: The initial timestamp cannot be later than this.
+            word_timestamps: Extract word-level timestamps using the cross-attention pattern
+              and dynamic time warping, and include the timestamps for each word in each segment.
+            prepend_punctuations: If word_timestamps is True, merge these punctuation symbols
+              with the next word
+            append_punctuations: If word_timestamps is True, merge these punctuation symbols
+              with the previous word
+            vad_filter: Enable the voice activity detection (VAD) to filter out parts of the audio
+              without speech. This step is using the Silero VAD model
+              https://github.com/snakers4/silero-vad.
+            vad_parameters: Dictionary of Silero VAD parameters or VadOptions class (see available
+              parameters and default values in the class `VadOptions`).
+        """
+
+        self.model = WhisperModel(
+            model_size_or_path,
+            device="auto" if "device" not in kwargs else kwargs["device"],
+            device_index=0 if "device_index" not in kwargs else kwargs["device_index"],
+            compute_type="default"
+            if "compute_type" not in kwargs
+            else kwargs["compute_type"],
+            cpu_threads=0 if "cpu_threads" not in kwargs else kwargs["cpu_threads"],
+            num_workers=1 if "num_workers" not in kwargs else kwargs["num_workers"],
+            download_root="models/whisper"
+            if "download_root" not in kwargs
+            else kwargs["download_root"],
+            local_files_only=False
+            if "local_files_only" not in kwargs
+            else kwargs["local_files_only"],
+        )
+
+        self.transcribe_opts = {
+            "language": None if "language" not in kwargs else kwargs["language"],
+            "task": "transcribe" if "task" not in kwargs else kwargs["task"],
+            "beam_size": 5 if "beam_size" not in kwargs else kwargs["beam_size"],
+            "best_of": 5 if "best_of" not in kwargs else kwargs["best_of"],
+            "patience": 1 if "patience" not in kwargs else kwargs["patience"],
+            "length_penalty": 1
+            if "length_penalty" not in kwargs
+            else kwargs["length_penalty"],
+            "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+            if "temperature" not in kwargs
+            else kwargs["temperature"],
+            "compression_ratio_threshold": 2.4
+            if "compression_ratio_threshold" not in kwargs
+            else kwargs["compression_ratio_threshold"],
+            "log_prob_threshold": -1.0
+            if "log_prob_threshold" not in kwargs
+            else kwargs["log_prob_threshold"],
+            "no_speech_threshold": 0.6
+            if "no_speech_threshold" not in kwargs
+            else kwargs["no_speech_threshold"],
+            "condition_on_previous_text": True
+            if "condition_on_previous_text" not in kwargs
+            else kwargs["condition_on_previous_text"],
+            "initial_prompt": None
+            if "initial_prompt" not in kwargs
+            else kwargs["initial_prompt"],
+            "prefix": None if "prefix" not in kwargs else kwargs["prefix"],
+            "suppress_blank": True
+            if "suppress_blank" not in kwargs
+            else kwargs["suppress_blank"],
+            "suppress_tokens": [-1]
+            if "suppress_tokens" not in kwargs
+            else kwargs["suppress_tokens"],
+            "without_timestamps": False
+            if "without_timestamps" not in kwargs
+            else kwargs["without_timestamps"],
+            "max_initial_timestamp": 1.0
+            if "max_initial_timestamp" not in kwargs
+            else kwargs["max_initial_timestamp"],
+            "word_timestamps": False
+            if "word_timestamps" not in kwargs
+            else kwargs["word_timestamps"],
+            "prepend_punctuations": "\"'“¿([{-"
+            if "prepend_punctuations" not in kwargs
+            else kwargs["prepend_punctuations"],
+            "append_punctuations": "\"'.。,，!！?？:：”)]}、"
+            if "append_punctuations" not in kwargs
+            else kwargs["append_punctuations"],
+            "vad_filter": False if "vad_filter" not in kwargs else kwargs["vad_filter"],
+            "vad_parameters": None
+            if "vad_parameters" not in kwargs
+            else kwargs["vad_parameters"],
+        }
+
+        self.responder = responder
+        self.buffer = []
+        self.transc_int_ms = transc_int_ms
+        self.keep_ms = keep_ms
+
+    def collect_audio(self, audio):
+        self.buffer.append(audio)
+        # ggml stream has a step size determining how often to run transcribe
+        # + ms to keep from previous step
+        # then run transcription every [step_size] with the concat buffer
+        # def step_ms=3000 (3s) keep_ms=200 (help if word got cut in the middle?)
+
+        # TODO: alternatively, run VAD to find end of sentence and transcribe that
+
+        print(f"len(Transcriber.buffer) = {len(self.buffer)}")
+        # FIX: is this the right calc?
+        if len(self.buffer) >= self.transc_int_ms * MS:
+            self.transcribe(self.buffer)
+            self.buffer = self.buffer[self.keep_ms * MS :]
+
+
+    def transcribe(self, audio):
+        # TODO: probably want to collect multiple frames
+        segments, info = self.model.transcribe(audio, **self.transcribe_opts)
+        # is it faster to collect transcriptions, or iterate transcribe->respond
+        # // do we want to respond to each segment, or the whole thing?
+        self.responder.respond(segments)
+
+    def transcribe_cb(
+        self,
+        in_data: bytes | None,
+        frame_count: int,
+        time_info: Mapping[str, float],
+        status: int,
+    ):
+        if in_data is None:
+            print("[transcribe_cb]: got None in_data")
+            return (in_data, pyaudio.paAbort)
+
+        self.collect_audio(in_data)
+        return (in_data, pyaudio.paContinue)
+
+
+def main(transc_int, whisper_model):
+    responder = Responder()
+    transcriber = Transcriber(whisper_model, responder)
+    p, stream = init_audio(transcriber.transcribe_cb)
+    print("here")
+    try:
+        while True:
+            time.sleep(transc_int)
+    except KeyboardInterrupt:
+        pass
+    cleanup(p, stream)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-i", "--interval", type=float, default=5, help="Transcription interval (s)"
+    )
+    parser.add_argument(
+        "-w",
+        "--whisper-model",
+        type=str,
+        default=DEF_MODEL_SIZE,
+        help="Whisper model size (tiny.en, base.en, small.en, medium.en, large-v1, large-v2)",
+    )
+    parser.add_argument(
+        "-d",
+        "--device",
+        type=str,
+        default="cpu",
+        help="Device to use. Default cpu",
+    )
+    args = parser.parse_args()
+    transc_int = args.interval
+    whisper_model = args.whisper_model
+    device = args.device
+
+    main(transc_int, whisper_model)
