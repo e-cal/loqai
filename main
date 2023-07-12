@@ -5,7 +5,8 @@ import os
 import subprocess
 import time
 import wave
-from typing import Mapping
+from collections import deque
+from typing import Deque, Mapping
 
 import numpy as np
 import pyaudio
@@ -15,12 +16,9 @@ from faster_whisper.transcribe import Segment
 from llamapi import get_response
 
 # Audio recording
-CHUNK = 1024
 FORMAT = pyaudio.paInt16
 CHANNELS = 2
 RATE = 16000  # whisper requires 16Hz i think
-MS = int(CHUNK / RATE * 1000)
-SEC = int(RATE / CHUNK)
 
 # Whisper
 DEF_MODEL_SIZE = "tiny.en"  # tiny.en, base.en, small.en, medium.en, large-v1, large-v2
@@ -34,7 +32,6 @@ def init_audio(callback) -> tuple[pyaudio.PyAudio, pyaudio.Stream]:
         channels=CHANNELS,
         rate=RATE,
         input=True,
-        frames_per_buffer=CHUNK,
         stream_callback=callback,
     )
     return p, stream
@@ -42,9 +39,9 @@ def init_audio(callback) -> tuple[pyaudio.PyAudio, pyaudio.Stream]:
 
 def write_audio(frames, p):
     wf = wave.open(".__tmp.wav", "wb")
-    wf.setnchannels(2)
+    wf.setnchannels(CHANNELS)
     wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
-    wf.setframerate(16000)
+    wf.setframerate(RATE)
     wf.writeframes(b"".join(frames))
     wf.close()
 
@@ -65,12 +62,15 @@ class Responder:
 
 
 class Transcriber:
+    buffer: Deque[bytes]
+
     def __init__(
         self,
         model_size_or_path: str,
         responder: Responder,
         transc_int_ms: int = 3000,
         keep_ms: int = 200,
+        use_vad: bool = False,
         **kwargs,
     ) -> None:
         """Initializes the Transcriber and internal Whisper model.
@@ -84,7 +84,7 @@ class Transcriber:
             responder: A responder object that implements the `respond` method.
             transc_int_ms: Interval in milliseconds between transcriptions.
             keep_ms: Number of milliseconds to keep in the buffer from the previous transcription.
-        
+
 
         Kwargs:
 
@@ -152,6 +152,7 @@ class Transcriber:
               parameters and default values in the class `VadOptions`).
         """
 
+        # TODO: support (look for?) model path so we can run offline
         self.model = WhisperModel(
             model_size_or_path,
             device="auto" if "device" not in kwargs else kwargs["device"],
@@ -169,84 +170,42 @@ class Transcriber:
             else kwargs["local_files_only"],
         )
 
+        # fmt: off
         self.transcribe_opts = {
             "language": None if "language" not in kwargs else kwargs["language"],
             "task": "transcribe" if "task" not in kwargs else kwargs["task"],
             "beam_size": 5 if "beam_size" not in kwargs else kwargs["beam_size"],
             "best_of": 5 if "best_of" not in kwargs else kwargs["best_of"],
             "patience": 1 if "patience" not in kwargs else kwargs["patience"],
-            "length_penalty": 1
-            if "length_penalty" not in kwargs
-            else kwargs["length_penalty"],
-            "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-            if "temperature" not in kwargs
-            else kwargs["temperature"],
-            "compression_ratio_threshold": 2.4
-            if "compression_ratio_threshold" not in kwargs
-            else kwargs["compression_ratio_threshold"],
-            "log_prob_threshold": -1.0
-            if "log_prob_threshold" not in kwargs
-            else kwargs["log_prob_threshold"],
-            "no_speech_threshold": 0.6
-            if "no_speech_threshold" not in kwargs
-            else kwargs["no_speech_threshold"],
-            "condition_on_previous_text": True
-            if "condition_on_previous_text" not in kwargs
-            else kwargs["condition_on_previous_text"],
-            "initial_prompt": None
-            if "initial_prompt" not in kwargs
-            else kwargs["initial_prompt"],
-            "prefix": None if "prefix" not in kwargs else kwargs["prefix"],
-            "suppress_blank": True
-            if "suppress_blank" not in kwargs
-            else kwargs["suppress_blank"],
-            "suppress_tokens": [-1]
-            if "suppress_tokens" not in kwargs
-            else kwargs["suppress_tokens"],
-            "without_timestamps": False
-            if "without_timestamps" not in kwargs
-            else kwargs["without_timestamps"],
-            "max_initial_timestamp": 1.0
-            if "max_initial_timestamp" not in kwargs
-            else kwargs["max_initial_timestamp"],
-            "word_timestamps": False
-            if "word_timestamps" not in kwargs
-            else kwargs["word_timestamps"],
-            "prepend_punctuations": "\"'“¿([{-"
-            if "prepend_punctuations" not in kwargs
-            else kwargs["prepend_punctuations"],
-            "append_punctuations": "\"'.。,，!！?？:：”)]}、"
-            if "append_punctuations" not in kwargs
-            else kwargs["append_punctuations"],
+            "length_penalty": 1 if "length_penalty" not in kwargs else kwargs["length_penalty"],
+            "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] if "temperature" not in kwargs else kwargs["temperature"],
+            "compression_ratio_threshold": 2.4 if "compression_ratio_threshold" not in kwargs else kwargs["compression_ratio_threshold"],
+            "log_prob_threshold": -1.0 if "log_prob_threshold" not in kwargs else kwargs["log_prob_threshold"],
+            "no_speech_threshold": 0.6 if "no_speech_threshold" not in kwargs else kwargs["no_speech_threshold"],
+            "condition_on_previous_text": True if "condition_on_previous_text" not in kwargs else kwargs["condition_on_previous_text"],
+            "initial_prompt": None if "initial_prompt" not in kwargs else kwargs["initial_prompt"],
+            "prefix": None if "prefix" not in kwargs else kwargs["prefix"], 
+            "suppress_blank": True if "suppress_blank" not in kwargs else kwargs["suppress_blank"],
+            "suppress_tokens": [-1] if "suppress_tokens" not in kwargs else kwargs["suppress_tokens"],
+            "without_timestamps": False if "without_timestamps" not in kwargs else kwargs["without_timestamps"],
+            "max_initial_timestamp": 1.0 if "max_initial_timestamp" not in kwargs else kwargs["max_initial_timestamp"],
+            "word_timestamps": False if "word_timestamps" not in kwargs else kwargs["word_timestamps"],
+            "prepend_punctuations": "\"'“¿([{-" if "prepend_punctuations" not in kwargs else kwargs["prepend_punctuations"],
+            "append_punctuations": "\"'.。,，!！?？:：”)]}、" if "append_punctuations" not in kwargs else kwargs["append_punctuations"],
             "vad_filter": False if "vad_filter" not in kwargs else kwargs["vad_filter"],
-            "vad_parameters": None
-            if "vad_parameters" not in kwargs
-            else kwargs["vad_parameters"],
+            "vad_parameters": None if "vad_parameters" not in kwargs else kwargs["vad_parameters"],
         }
+        # fmt: on
 
         self.responder = responder
-        self.buffer = []
-        self.transc_int_ms = transc_int_ms
-        self.keep_ms = keep_ms
+        self.transc_int = transc_int_ms / 1000
+        self.keep = keep_ms / 1000
+        self.keep_n = int(self.keep * RATE)
+        self.buffer = deque(maxlen=int((RATE * self.transc_int) + self.keep_n))
+        self.use_vad = use_vad
+        self._stop = False
 
-    def collect_audio(self, audio):
-        self.buffer.append(audio)
-        # ggml stream has a step size determining how often to run transcribe
-        # + ms to keep from previous step
-        # then run transcription every [step_size] with the concat buffer
-        # def step_ms=3000 (3s) keep_ms=200 (help if word got cut in the middle?)
-
-        # TODO: alternatively, run VAD to find end of sentence and transcribe that
-
-        print(f"len(Transcriber.buffer) = {len(self.buffer)}")
-        # FIX: is this the right calc?
-        if len(self.buffer) >= self.transc_int_ms * MS:
-            self.transcribe(self.buffer)
-            self.buffer = self.buffer[self.keep_ms * MS :]
-
-
-    def transcribe(self, audio):
-        # TODO: probably want to collect multiple frames
+    def transcribe(self, audio: np.ndarray):
         print("transcribing...")
         segments, info = self.model.transcribe(audio, **self.transcribe_opts)
         transcript = list(segments)
@@ -254,7 +213,24 @@ class Transcriber:
         print(transcript)
         self.responder.respond(transcript)
 
-    def transcribe_cb(
+    def collect_audio(self, audio: bytes):
+        self.buffer.extend(np.frombuffer(audio, np.int16))
+        # TODO: alternatively, run VAD to find end of sentence and transcribe that
+        if self.use_vad:
+            print("[Transcriber.collect_audio] vad not implemented")
+            pass
+        else:
+            print("here")
+            print(self.transc_int * RATE)
+            if len(self.buffer) >= self.transc_int * RATE:
+                self.transcribe(np.array(self.buffer))  # transcribe the audio
+                # keep the last keep_ms of audio, clear the rest
+                self.buffer.rotate(self.keep_n)
+                keep = [self.buffer.popleft() for _ in range(self.keep_n)]
+                self.buffer.clear()
+                self.buffer.extend(keep)
+
+    def input_audio_cb(
         self,
         in_data: bytes | None,
         frame_count: int,
@@ -263,22 +239,26 @@ class Transcriber:
     ):
         if in_data is None:
             print("[transcribe_cb]: got None in_data")
-            return (in_data, pyaudio.paAbort)
+            return (None, pyaudio.paAbort)
 
         self.collect_audio(in_data)
-        return (in_data, pyaudio.paContinue)
+
+        if self._stop: return (None, pyaudio.paComplete)
+        return (None, pyaudio.paContinue)
+
+    def stop(self):
+        self._stop = True
 
 
 def main(transc_int, whisper_model):
     responder = Responder()
     transcriber = Transcriber(whisper_model, responder)
-    p, stream = init_audio(transcriber.transcribe_cb)
-    print("here")
+    p, stream = init_audio(transcriber.input_audio_cb)
     try:
         while True:
             time.sleep(transc_int)
     except KeyboardInterrupt:
-        pass
+        transcriber.stop()
     cleanup(p, stream)
 
 
